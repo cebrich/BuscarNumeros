@@ -730,7 +730,7 @@
     }
 
     // Restaurar al abrir (Navidad por defecto)
-    setSorteo(DRAW_LIST[0].key);
+    setSorteo(SORTEOS['navidad'] ? 'navidad' : DRAW_LIST[0].key);
 
     document.getElementById('sorteoSelect').addEventListener('change', function () {
       setSorteo(this.value);
