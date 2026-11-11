@@ -241,6 +241,11 @@
       margin-top: 0.55rem;
     }
 
+    .hint.warn {
+      color: #e65100;
+      font-weight: 600;
+    }
+
     .tabs {
       display: flex;
       gap: 0.35rem;
@@ -334,13 +339,9 @@
       <h2>1. Cargar listado</h2>
 
       <div style="margin-bottom:1rem;">
-        <label for="sorteoSelect">Sorteo</label>
-        <select id="sorteoSelect" style="width:100%;padding:0.65rem 0.85rem;border:1.5px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;background:white;">
-          <option value="navidad" selected>Navidad</option>
-          <option value="jueves">Jueves</option>
-          <option value="sabado">Sábado</option>
-          <option value="nino">El Niño</option>
-        </select>
+        <label for="sorteoSelect">Próximos sorteos</label>
+        <select id="sorteoSelect" style="width:100%;padding:0.65rem 0.85rem;border:1.5px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;background:white;"></select>
+        <p class="hint" id="sorteoHint"></p>
       </div>
 
       <div class="steps">
@@ -377,9 +378,9 @@
       </div>
 
       <div style="margin-top:1rem;padding-top:0.9rem;border-top:1px solid var(--border);">
-        <label for="csvUrl">URL libre del CSV (cualquier sorteo)</label>
-        <input type="url" id="csvUrl" value="https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo2026102.csv?drawId=1332409102&locale=es&cdc=13324" placeholder="Pega aquí la URL del CSV del sorteo">
-        <p class="hint">Si eliges un sorteo del desplegable se rellena solo. También puedes pegar una URL distinta y usar “Descargar listado oficial”.</p>
+        <label for="csvUrl">URL del CSV (se rellena según el sorteo)</label>
+        <input type="url" id="csvUrl" placeholder="Pega aquí la URL del CSV del sorteo">
+        <p class="hint">Al elegir un sorteo se rellena sola. Si algún enlace no funciona, pega aquí el que te da la web de Loterías al buscar un número: queda guardado para ese sorteo (vacía el campo para volver al calculado).</p>
       </div>
 
       <details>
@@ -460,24 +461,140 @@
 
   <script>
     const LIMIT = 25;
-    const SORTEOS = {
-      navidad: {
-        name: 'Navidad',
-        url: 'https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo2026102.csv?drawId=1332409102&locale=es&cdc=13324'
-      },
-      jueves: {
-        name: 'Jueves',
-        url: 'https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo2026091.csv?drawId=1328409091&locale=es&cdc=13284'
-      },
-      sabado: {
-        name: 'Sábado',
-        url: 'https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo2026092.csv?drawId=1328609092&locale=es&cdc=13286'
-      },
-      nino: {
-        name: 'El Niño',
-        url: 'https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo2026092.csv?drawId=1328609092&locale=es&cdc=13286'
-      }
+
+    /*
+     * CALENDARIO DE SORTEOS DE LOTERÍA NACIONAL (se genera solo)
+     *
+     * Regla del CSV oficial (comprobada con enlaces reales):
+     *   drawId  = DDDDD + "09" + NNN
+     *   DDDDD   = días desde la fecha de referencia (12/11/2026 = 13284). Sube 1 por día.
+     *   NNN     = nº de sorteo del año (3 cifras). Vuelve a 001 el primer sorteo del año.
+     *   fichero = "Sorteo" + año + NNN + ".csv"   ·   cdc = DDDDD
+     *
+     * Cada jueves y sábado hay sorteo, más los extraordinarios. Si un sorteo cambia
+     * de día o no se celebra, ajusta a mano SOLO este bloque:
+     *   - extras:     sorteos extraordinarios (fecha AAAA-MM-DD y nombre)
+     *   - skip:       jueves/sábados en los que NO hay sorteo
+     *   - fixedNums:  nº de sorteo real de una fecha (re-sincroniza la cuenta desde ahí)
+     *   - verified:   fechas cuyo enlace has comprobado (quita el aviso naranja)
+     */
+    const CAL = {
+      anchor: { date: '2026-11-12', num: 91 },   // sorteo conocido desde el que se cuenta
+      horizonDays: 430,                          // hasta cuándo se genera
+      extras: [
+        { date: '2026-12-06', name: 'Sorteo Extraordinario Día de la Constitución' },
+        { date: '2026-12-22', name: 'Sorteo Extraordinario de Navidad' },
+        { date: '2027-01-06', name: 'Sorteo Extraordinario de “El Niño”' }
+      ],
+      skip: ['2026-12-05', '2026-12-19', '2027-01-02'],
+      fixedNums: { '2026-12-22': 102, '2027-01-06': 1 },
+      verified: ['2026-11-12', '2026-11-14', '2026-11-21', '2026-12-22', '2027-01-06']
     };
+
+    const UPCOMING = 20;                         // cuántos sorteos se muestran
+    const REF_MS = Date.UTC(2026, 10, 12);       // 12/11/2026
+    const REF_COUNTER = 13284;
+    const MS_DAY = 86400000;
+
+    // Claves antiguas, para conservar los listados ya guardados
+    const LEGACY_KEYS = {
+      '2026-11-12': 'jueves',
+      '2026-11-14': 'sabado',
+      '2026-12-22': 'navidad',
+      '2027-01-06': 'nino'
+    };
+
+    function isoToMs(iso) {
+      const p = iso.split('-').map(Number);
+      return Date.UTC(p[0], p[1] - 1, p[2]);
+    }
+
+    function buildCsvUrl(d) {
+      const counter = REF_COUNTER + Math.round((isoToMs(d.date) - REF_MS) / MS_DAY);
+      const nnn = String(d.num).padStart(3, '0');
+      return 'https://www.loteriasyapuestas.es/new-geo-web/GeoTerminalServlet/Sorteo' + d.date.slice(0, 4) + nnn +
+             '.csv?drawId=' + counter + '09' + nnn + '&locale=es&cdc=' + counter;
+    }
+
+    function fmtDate(iso) {
+      const p = iso.split('-');
+      return p[2] + '/' + p[1] + '/' + p[0];
+    }
+
+    function generateDraws() {
+      const list = [];
+      const start = isoToMs(CAL.anchor.date);
+      let num = CAL.anchor.num;
+      let prevYear = CAL.anchor.date.slice(0, 4);
+      let first = true;
+      for (let i = 0; i <= CAL.horizonDays; i++) {
+        const ms = start + i * MS_DAY;
+        const iso = new Date(ms).toISOString().slice(0, 10);
+        const dow = new Date(ms).getUTCDay();   // 4 = jueves, 6 = sábado
+        const extra = CAL.extras.filter(function (e) { return e.date === iso; })[0];
+        const regular = (dow === 4 || dow === 6) && CAL.skip.indexOf(iso) < 0;
+        if (!extra && !regular) continue;
+        if (!first) {
+          const y = iso.slice(0, 4);
+          num = (y !== prevYear) ? 1 : num + 1;
+          prevYear = y;
+        }
+        first = false;
+        if (CAL.fixedNums[iso]) num = CAL.fixedNums[iso];
+        list.push({
+          key: LEGACY_KEYS[iso] || 's-' + iso.replace(/-/g, ''),
+          date: iso,
+          num: num,
+          name: extra ? extra.name : (dow === 4 ? 'Sorteo del Jueves' : 'Sorteo de Lotería Nacional')
+        });
+      }
+      return list;
+    }
+
+    function customUrlKey(id) { return 'loteria_url_' + id + '_v1'; }
+    function getCustomUrl(id) {
+      try { return localStorage.getItem(customUrlKey(id)) || ''; } catch (e) { return ''; }
+    }
+    function setCustomUrl(id, url) {
+      try {
+        if (url) localStorage.setItem(customUrlKey(id), url);
+        else localStorage.removeItem(customUrlKey(id));
+      } catch (e) {}
+    }
+
+    function todayISO() {
+      return new Date().toLocaleDateString('sv-SE'); // AAAA-MM-DD en hora local
+    }
+
+    let SORTEOS = {};
+    let DRAW_LIST = [];
+
+    // Rellena el desplegable y el mapa de sorteos a partir de una lista
+    function setDrawList(list) {
+      DRAW_LIST = list;
+      SORTEOS = {};
+      const sel = document.getElementById('sorteoSelect');
+      sel.innerHTML = '';
+      list.forEach(function (d) {
+        SORTEOS[d.key] = {
+          name: fmtDate(d.date) + ' · ' + d.name,
+          url: buildCsvUrl(d),
+          approx: CAL.verified.indexOf(d.date) < 0
+        };
+        const opt = document.createElement('option');
+        opt.value = d.key;
+        opt.textContent = SORTEOS[d.key].name;
+        sel.appendChild(opt);
+      });
+    }
+
+    // Próximos sorteos (los que aún no han pasado)
+    (function () {
+      const all = generateDraws();
+      const hoy = todayISO();
+      const next = all.filter(function (d) { return d.date >= hoy; }).slice(0, UPCOMING);
+      setDrawList(next.length ? next : all.slice(-UPCOMING));
+    })();
 
     let currentSorteo = 'navidad';
     let numbersMap = new Map();
@@ -567,7 +684,7 @@
         return false;
       }
       saveToStorage(map);
-      setStatus('✅ Cargados <strong>' + map.size.toLocaleString('es-ES') + '</strong> números · origen: ' + source);
+      setStatus('✅ Cargados <strong>' + map.size.toLocaleString('es-ES') + '</strong> números · ' + SORTEOS[currentSorteo].name + ' · origen: ' + source);
       enableSearch(true);
       return true;
     }
@@ -575,8 +692,21 @@
     function setSorteo(id, restore) {
       if (!SORTEOS[id]) return;
       currentSorteo = id;
-      document.getElementById('csvUrl').value = SORTEOS[id].url;
+      const custom = getCustomUrl(id);
+      document.getElementById('csvUrl').value = custom || SORTEOS[id].url;
       document.getElementById('sorteoSelect').value = id;
+
+      const hint = document.getElementById('sorteoHint');
+      if (custom) {
+        hint.textContent = '✅ Usando el enlace que guardaste para este sorteo.';
+        hint.className = 'hint';
+      } else if (SORTEOS[id].approx) {
+        hint.textContent = '⚠ Enlace calculado, sin verificar. Si no funciona, busca un número de este sorteo en la web de Loterías, copia el enlace del CSV y pégalo en “URL del CSV”: se guardará para este sorteo.';
+        hint.className = 'hint warn';
+      } else {
+        hint.textContent = '';
+        hint.className = 'hint';
+      }
 
       // Reset UI state for the new sorteo
       numbersMap = new Map();
@@ -584,7 +714,6 @@
       document.getElementById('resultsCard').style.display = 'none';
       updateSavedInfo(null);
       document.getElementById('status').className = 'status';
-      document.getElementById('status').style.display = 'none';
 
       if (restore !== false) {
         const saved = loadFromStorage();
@@ -601,16 +730,36 @@
     }
 
     // Restaurar al abrir (Navidad por defecto)
-    setSorteo('navidad');
+    setSorteo(DRAW_LIST[0].key);
 
     document.getElementById('sorteoSelect').addEventListener('change', function () {
       setSorteo(this.value);
     });
 
-    // Si el usuario edita la URL a mano, se usa esa (no se fuerza el selector)
+    // Si pegas un enlace propio, se guarda para el sorteo elegido.
+    // Si dejas el campo vacío, vuelve al enlace calculado.
     document.getElementById('csvUrl').addEventListener('change', function () {
-      // no cambiamos currentSorteo para no pisar el listado guardado de un sorteo concreto
-      // solo se usa esta URL al pulsar Descargar
+      const url = this.value.trim();
+      const hint = document.getElementById('sorteoHint');
+      if (!url) {
+        setCustomUrl(currentSorteo, '');
+        this.value = SORTEOS[currentSorteo].url;
+        hint.textContent = 'Enlace restablecido al calculado para este sorteo.';
+        hint.className = 'hint';
+        return;
+      }
+      if (!/^https?:\/\//i.test(url)) {
+        hint.textContent = '⚠ Eso no parece un enlace (debe empezar por https://).';
+        hint.className = 'hint warn';
+        return;
+      }
+      if (url === SORTEOS[currentSorteo].url) {
+        setCustomUrl(currentSorteo, '');
+      } else {
+        setCustomUrl(currentSorteo, url);
+        hint.textContent = '✅ Enlace guardado para ' + SORTEOS[currentSorteo].name + '.';
+        hint.className = 'hint';
+      }
     });
 
     // Paso 1: descargar oficial
@@ -634,12 +783,25 @@
       const file = fileInput.files[0];
       const reader = new FileReader();
       reader.onload = function (e) {
-        applyData(parseCSV(e.target.result), 'archivo');
+        const text = String(e.target.result || '');
+        const map = parseCSV(text);
+        if (map.size === 0) {
+          const preview = text.slice(0, 200).replace(/[<>&]/g, function (c) {
+            return c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;';
+          });
+          setStatus('No se encontraron números válidos en el archivo. Esto es lo que contiene:<br><code>' +
+                    (preview || '(vacío)') + '</code>', 'error');
+          numbersMap = new Map();
+          enableSearch(false);
+          return;
+        }
+        applyData(map, 'archivo');
       };
       reader.onerror = function () {
         setStatus('Error al leer el archivo.', 'error');
       };
       reader.readAsText(file, 'UTF-8');
+      fileInput.value = '';
     });
 
     // Guardar copia local
@@ -656,10 +818,10 @@
       const link = document.createElement('a');
       const date = new Date().toISOString().slice(0, 10);
       link.href = URL.createObjectURL(blob);
-      link.download = 'numeros-disponibles-' + date + '.csv';
+      link.download = 'numeros-disponibles-' + currentSorteo + '-' + date + '.csv';
       link.click();
       URL.revokeObjectURL(link.href);
-      setStatus('💾 Archivo guardado: numeros-disponibles-' + date + '.csv', 'ok');
+      setStatus('💾 Archivo guardado: ' + link.download, 'ok');
     });
 
     // Pegar texto
